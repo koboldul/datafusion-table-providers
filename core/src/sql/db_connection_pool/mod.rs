@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use dbconnection::DbConnection;
 use std::sync::Arc;
 
+#[cfg(feature = "clickhouse")]
+pub mod clickhousepool;
 pub mod dbconnection;
 #[cfg(feature = "duckdb")]
 pub mod duckdbpool;

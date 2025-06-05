@@ -7,6 +7,13 @@ use datafusion::{
     prelude::ident,
 };
 use futures::future;
+#[cfg(feature = "parquet")]
+#[cfg(feature = "parquet")]
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+#[cfg(all(test, feature = "parquet"))]
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+#[cfg(all(test, feature = "parquet"))]
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use snafu::prelude::*;
 
 #[derive(Debug, Snafu)]
@@ -116,11 +123,9 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     use datafusion::arrow::datatypes::SchemaRef;
-    use datafusion::{
-        common::{Constraint, Constraints},
-        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder,
-    };
+    use datafusion::common::{Constraint, Constraints};
 
+    #[cfg(feature = "parquet")]
     #[tokio::test]
     async fn test_validate_batch_with_constraints() -> Result<(), Box<dyn std::error::Error>> {
         let parquet_bytes = reqwest::get("https://public-data.spiceai.org/taxi_sample.parquet")

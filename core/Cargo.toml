@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-table-providers"
-version = { workspace = true} 
+version = { workspace = true }
 readme = { workspace = true }
 edition = { workspace = true }
 repository = { workspace = true }
@@ -9,6 +9,7 @@ description = { workspace = true }
 
 [dependencies]
 arrow = { workspace = true }
+parquet = { version = "50", optional = true }
 arrow-array = { workspace = true, optional = true }
 arrow-flight = { workspace = true, optional = true, features = [
   "flight-sql-experimental",
@@ -26,6 +27,7 @@ bigdecimal = "0.4"
 byteorder = "1.5.0"
 bytes = { version = "1.7.1", optional = true }
 byte-unit = { version = "5.1.4", optional = true }
+clickhouse = { version = "0.13.3", optional = true, default-features = false } # Official ClickHouse crate
 chrono = "0.4"
 dashmap = "6.1.0"
 datafusion = { workspace = true, default-features = false }
@@ -112,6 +114,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3.19.1"
 
 [features]
+parquet = ["dep:parquet"]
+clickhouse = [
+  "dep:clickhouse",
+  "dep:async-stream",
+  "dep:arrow-schema",
+] # Feature for ClickHouse provider
+clickhouse-federation = [
+  "clickhouse",
+  "federation",
+] # Feature for ClickHouse federation
+
 duckdb = [
   "dep:duckdb",
   "dep:r2d2",
@@ -161,6 +174,12 @@ path = "examples/flight-sql.rs"
 required-features = ["flight"]
 
 [[example]]
+
 name = "sqlite"
 path = "examples/sqlite.rs"
 required-features = ["sqlite"]
+
+[[example]]
+name = "clickhouse"
+path = "examples/clickhouse.rs"
+required-features = ["clickhouse"]
