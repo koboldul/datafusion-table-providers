@@ -1,7 +1,6 @@
 #![cfg(feature = "clickhouse")]
 
 use clickhouse::Client;
-use std::sync::Arc;
 
 use crate::sql::db_connection_pool::{
     dbconnection::{clickhouseconn::ClickHouseConnection, DbConnection},
@@ -66,13 +65,20 @@ pub struct ClickHouseConnectionPool {
     join_push_down: JoinPushDown,
 }
 
-impl ClickHouseConnectionPool {
-    pub async fn connect(&self) -> Result<ClickHouseConnection, Error> {
-        // Just clone the client for each connection
-        Ok(ClickHouseConnection::new(self.client.clone()))
+#[async_trait]
+impl DbConnectionPool<Client, String> for ClickHouseConnectionPool {
+    async fn connect(&self) -> Result<Box<dyn DbConnection<Client, String>>> {
+        Ok(Box::new(ClickHouseConnection::new(self.client.clone())))
     }
 
-    pub fn join_push_down(&self) -> JoinPushDown {
+    fn join_push_down(&self) -> JoinPushDown {
         self.join_push_down.clone()
+    }
+}
+
+impl ClickHouseConnectionPool {
+    pub async fn connect_direct(&self) -> Result<ClickHouseConnection, Error> {
+        // Just clone the client for each connection
+        Ok(ClickHouseConnection::new(self.client.clone()))
     }
 }

@@ -6,15 +6,11 @@ use std::{any::Any, sync::Arc};
 use crate::sql::db_connection_pool::dbconnection::{
     AsyncDbConnection, DbConnection, Error as DbConnectionError, GenericError, Result,
 };
-use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
-use async_stream::stream;
+use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use clickhouse::{error::Error as ClickHouseError, Client, Row};
-use datafusion::{
-    arrow::error::ArrowError, execution::SendableRecordBatchStream, sql::TableReference,
-};
-use futures::stream::StreamExt;
-use snafu::prelude::*;
+use datafusion::{execution::SendableRecordBatchStream, sql::TableReference};
+use serde::Deserialize;
 
 pub struct ClickHouseConnection {
     client: Client,
@@ -85,6 +81,158 @@ impl ClickHouseConnection {
     }
 }
 
-/* Removed trait impls for DbConnection<Pool, Query> for ClickHouseConnection */
+impl DbConnection<Client, String> for ClickHouseConnection {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 
-/* Removed trait impls for AsyncDbConnection<Pool, Query> for ClickHouseConnection and all related methods. */
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn as_async(&self) -> Option<&dyn AsyncDbConnection<Client, String>> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl AsyncDbConnection<Client, String> for ClickHouseConnection {
+    fn new(client: Client) -> Self {
+        Self { client }
+    }
+
+    async fn tables(&self, schema: &str) -> Result<Vec<String>, DbConnectionError> {
+        let sql = format!(
+            "SELECT name FROM system.tables WHERE database = '{}'",
+            schema
+        );
+
+        let mut cursor = self.client.query(&sql).fetch::<String>().map_err(|e| {
+            DbConnectionError::UnableToGetTables {
+                source: Box::new(e),
+            }
+        })?;
+
+        let mut tables = Vec::new();
+        while let Some(row) =
+            cursor
+                .next()
+                .await
+                .map_err(|e| DbConnectionError::UnableToGetTables {
+                    source: Box::new(e),
+                })?
+        {
+            tables.push(row);
+        }
+        Ok(tables)
+    }
+
+    async fn schemas(&self) -> Result<Vec<String>, DbConnectionError> {
+        let sql = "SELECT name FROM system.databases";
+
+        let mut cursor = self.client.query(sql).fetch::<String>().map_err(|e| {
+            DbConnectionError::UnableToGetSchemas {
+                source: Box::new(e),
+            }
+        })?;
+
+        let mut schemas = Vec::new();
+        while let Some(row) =
+            cursor
+                .next()
+                .await
+                .map_err(|e| DbConnectionError::UnableToGetSchemas {
+                    source: Box::new(e),
+                })?
+        {
+            schemas.push(row);
+        }
+        Ok(schemas)
+    }
+
+    async fn get_schema(
+        &self,
+        table_reference: &TableReference,
+    ) -> Result<SchemaRef, DbConnectionError> {
+        let database = table_reference.schema().unwrap_or("default");
+        let table = table_reference.table();
+
+        let sql = format!(
+            "SELECT name, type FROM system.columns WHERE database = '{}' AND table = '{}' ORDER BY position",
+            database, table
+        );
+
+        #[derive(Row, Debug, Deserialize)]
+        struct ColumnInfo {
+            name: String,
+            #[serde(rename = "type")]
+            column_type: String,
+        }
+
+        let rows = self
+            .client
+            .query(&sql)
+            .fetch_all::<ColumnInfo>()
+            .await
+            .map_err(|e| DbConnectionError::UndefinedTable {
+                table_name: table_reference.to_string(),
+                source: Box::new(e),
+            })?;
+
+        if rows.is_empty() {
+            return Err(DbConnectionError::UndefinedTable {
+                table_name: table_reference.to_string(),
+                source: Box::new(ClickHouseError::Custom("Table not found".to_string())),
+            });
+        }
+
+        let mut fields = Vec::new();
+        for row in rows {
+            let arrow_type = Self::map_clickhouse_type_to_arrow(&row.column_type, &row.name)?;
+            let is_nullable = row.column_type.starts_with("Nullable(");
+            fields.push(arrow::datatypes::Field::new(
+                row.name,
+                arrow_type,
+                is_nullable,
+            ));
+        }
+
+        Ok(Arc::new(arrow::datatypes::Schema::new(fields)))
+    }
+
+    async fn query_arrow(
+        &self,
+        sql: &str,
+        _params: &[String],
+        projected_schema: Option<SchemaRef>,
+    ) -> Result<SendableRecordBatchStream> {
+        // For now, implement a basic query that returns the projected schema
+        // This is a placeholder implementation that should be improved
+
+        let schema = projected_schema.unwrap_or_else(|| {
+            Arc::new(arrow::datatypes::Schema::new(vec![
+                arrow::datatypes::Field::new("result", arrow::datatypes::DataType::Utf8, true),
+            ]))
+        });
+
+        // For now, create an empty stream with the correct schema
+        // This is a placeholder - real implementation would execute the ClickHouse query
+        let batches: Vec<arrow::record_batch::RecordBatch> =
+            vec![arrow::record_batch::RecordBatch::new_empty(schema.clone())];
+
+        use datafusion::physical_plan::memory::MemoryStream;
+        let stream = MemoryStream::try_new(batches, schema, None)
+            .map_err(|e| Box::new(e) as GenericError)?;
+
+        Ok(Box::pin(stream))
+    }
+
+    async fn execute(&self, sql: &str, _params: &[String]) -> Result<u64> {
+        self.client
+            .query(sql)
+            .execute()
+            .await
+            .map(|_| 0u64) // ClickHouse execute doesn't return affected rows count, return 0
+            .map_err(|e| Box::new(e) as GenericError)
+    }
+}

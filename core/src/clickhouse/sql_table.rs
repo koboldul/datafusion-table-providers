@@ -8,7 +8,9 @@ use datafusion::{
     error::{DataFusionError, Result as DataFusionResult},
     execution::{context::SessionState, SendableRecordBatchStream},
     logical_expr::{Expr, TableProviderFilterPushDown},
-    physical_plan::{project_schema, ExecutionPlan, PhysicalExpr},
+    physical_expr::EquivalenceProperties,
+    physical_plan::execution_plan::{Boundedness, EmissionType},
+    physical_plan::{project_schema, ExecutionPlan, Partitioning, PhysicalExpr, PlanProperties},
     sql::TableReference,
 };
 use std::{any::Any, sync::Arc};
@@ -79,10 +81,7 @@ impl TableProvider for ClickHouseTable {
             None,
         )?);
 
-        Ok(Arc::new(StreamExec {
-            schema: projected_schema,
-            stream,
-        }))
+        Ok(Arc::new(StreamExec::new(projected_schema, stream)))
     }
 
     fn supports_filters_pushdown(
@@ -101,6 +100,23 @@ impl TableProvider for ClickHouseTable {
 struct StreamExec {
     schema: SchemaRef,
     stream: SendableRecordBatchStream,
+    plan_properties: PlanProperties,
+}
+
+impl StreamExec {
+    fn new(schema: SchemaRef, stream: SendableRecordBatchStream) -> Self {
+        let plan_properties = PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
+        Self {
+            schema,
+            stream,
+            plan_properties,
+        }
+    }
 }
 
 impl std::fmt::Debug for StreamExec {
@@ -141,7 +157,7 @@ impl ExecutionPlan for StreamExec {
     }
 
     fn properties(&self) -> &datafusion::physical_plan::PlanProperties {
-        unimplemented!("PlanProperties not implemented for StreamExec")
+        &self.plan_properties
     }
 
     fn schema(&self) -> SchemaRef {

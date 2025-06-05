@@ -4,13 +4,11 @@ mod sql_table;
 pub use self::sql_table::ClickHouseTable;
 
 use crate::sql::db_connection_pool::{
-    clickhousepool::{ClickHouseConnectionPool, ClickHouseConnectionPoolFactory},
-    DbConnectionPool,
+    clickhousepool::ClickHouseConnectionPoolFactory, DbConnectionPool,
 };
-use crate::sql::sql_provider_datafusion::SqlTable; // Assuming we might use this helper
+use crate::sql::sql_provider_datafusion::SqlTable;
 use async_trait::async_trait;
 use datafusion::{
-    arrow::datatypes::SchemaRef,
     catalog::Session,
     datasource::TableProvider,
     error::{DataFusionError, Result as DataFusionResult},
@@ -82,29 +80,23 @@ impl datafusion::catalog::TableProviderFactory for ClickHouseTableProviderFactor
             .context(UnableToCreatePoolSnafu)
             .map_err(|e| to_datafusion_error(e))?;
 
-        let pool = pool_factory
-            .build()
-            .await
-            .map_err(DataFusionError::External)?;
-        let client = Arc::new(pool.client.clone());
+        let pool = Arc::new(
+            pool_factory
+                .build()
+                .await
+                .map_err(DataFusionError::External)?,
+        );
 
-        // Infer schema - requires DbConnectionPool::connect and DbConnection::get_schema to be implemented
         let table_ref = TableReference::from(cmd.name.clone());
-        // let conn = pool.connect().await.map_err(|e| DataFusionError::External(Box::new(e)))?;
-        // let schema = crate::sql::db_connection_pool::dbconnection::get_schema(conn, &table_ref)
-        //     .await
-        //     .context(UnableToInferSchemaSnafu {
-        //         table_name: table_ref.to_string(),
-        //     })
-        //     .map_err(|e| to_datafusion_error(e))?;
-        // For now, assume schema is provided or use a placeholder
-        // Convert DFSchema to Arrow Schema
-        let arrow_schema: SchemaRef = Arc::new(cmd.schema.as_ref().into());
 
-        // TODO: Validate provided schema against inferred schema if cmd.schema is provided?
+        // Use SqlTable instead of custom ClickHouseTable implementation
+        let dyn_pool: Arc<dyn DbConnectionPool<clickhouse::Client, String> + Send + Sync> = pool;
 
-        // Create the table provider instance
-        let table_provider = Arc::new(ClickHouseTable::new(client, table_ref, arrow_schema));
+        let table_provider = Arc::new(
+            SqlTable::new("clickhouse", &dyn_pool, table_ref)
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?,
+        );
 
         Ok(table_provider)
     }
