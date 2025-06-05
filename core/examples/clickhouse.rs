@@ -1,12 +1,8 @@
 #![cfg(feature = "clickhouse")]
 
-use datafusion::catalog::TableProviderFactory;
 use datafusion::prelude::*;
-use datafusion::sql::{
-    db_connection_pool::clickhousepool::ClickHouseConnectionPoolFactory, TableReference,
-};
-use datafusion_table_providers::clickhouse::ClickHouseTableProviderFactory;
 use datafusion_table_providers::common::DatabaseCatalogProvider;
+use datafusion_table_providers::sql::db_connection_pool::clickhousepool::ClickHouseConnectionPoolFactory;
 use std::sync::Arc;
 
 /// This example demonstrates querying a ClickHouse database.
@@ -22,7 +18,7 @@ use std::sync::Arc;
 /// INSERT INTO default.my_table VALUES (1, 'one'), (2, 'two');
 ///
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     println!("Running ClickHouse example...");
     println!(
         "Make sure you have a ClickHouse instance running and a table named 'default.my_table'."
@@ -31,10 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connection_string = "http://ice@localhost:8123/default";
     println!("Connecting to ClickHouse at: {}", connection_string);
 
+    let factory = ClickHouseConnectionPoolFactory::new(connection_string)
+        .expect("unable to create ClickHouse connection pool factory");
     let ch_pool = Arc::new(
-        ClickHouseConnectionPoolFactory::new(connection_string)
+        factory
+            .build()
             .await
-            .expect("unable to create Clickhouse connection pool"),
+            .expect("unable to build ClickHouse connection pool"),
     );
 
     let catalog = DatabaseCatalogProvider::try_new(ch_pool).await.unwrap();
@@ -48,14 +47,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ctx.register_catalog("default", table_provider)?;
 
     // Query the external table
-    let df = ctx.sql("SELECT * FROM datafusion_test LIMIT 10").await?;
+    let df = ctx
+        .sql("SELECT * FROM datafusion_test LIMIT 10")
+        .await
+        .expect("unable to execute SQL query");
 
     println!("Querying external table...");
 
     // Print the results
-    df.show().await?;
+    df.show().await.expect("unable to show results");
 
     println!("ClickHouse example finished successfully.");
-
-    Ok(())
 }

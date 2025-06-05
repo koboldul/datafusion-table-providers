@@ -114,6 +114,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3.19.1"
 
 [features]
+default = ["clickhouse"]
 parquet = ["dep:parquet"]
 clickhouse = [
   "dep:clickhouse",
@@ -174,7 +175,6 @@ path = "examples/flight-sql.rs"
 required-features = ["flight"]
 
 [[example]]
-
 name = "sqlite"
 path = "examples/sqlite.rs"
 required-features = ["sqlite"]

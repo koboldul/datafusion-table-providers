@@ -1,5 +1,3 @@
-#![cfg(feature = "clickhouse")]
-
 use crate::sql::db_connection_pool::dbconnection::UnsupportedDataTypeSnafu;
 use std::{any::Any, sync::Arc};
 
