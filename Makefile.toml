@@ -1,0 +1,11 @@
+[tasks.ch]
+command = "cargo"
+args = [
+    "run",
+    "--example",
+    "clickhouse",
+    "--features",
+    "clickhouse",
+    "--manifest-path",
+    "core/Cargo.toml",
+]
