@@ -61,9 +61,22 @@ impl ClickHouseConnectionPoolFactory {
     }
 }
 
+/*****************
+ * Connection Pool
+ ******************/
+
+pub type DynClickHouseConnectionPool = dyn DbConnectionPool<Client, String> + Send + Sync;
+
 pub struct ClickHouseConnectionPool {
     pub client: Client,
     join_push_down: JoinPushDown,
+}
+
+impl ClickHouseConnectionPool {
+    pub async fn connect_direct(&self) -> Result<ClickHouseConnection, Error> {
+        // Just clone the client for each connection
+        Ok(ClickHouseConnection::new(self.client.clone()))
+    }
 }
 
 #[async_trait]
@@ -74,12 +87,5 @@ impl DbConnectionPool<Client, String> for ClickHouseConnectionPool {
 
     fn join_push_down(&self) -> JoinPushDown {
         self.join_push_down.clone()
-    }
-}
-
-impl ClickHouseConnectionPool {
-    pub async fn connect_direct(&self) -> Result<ClickHouseConnection, Error> {
-        // Just clone the client for each connection
-        Ok(ClickHouseConnection::new(self.client.clone()))
     }
 }

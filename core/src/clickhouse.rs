@@ -1,8 +1,9 @@
 #![cfg(feature = "clickhouse")]
 
 mod sql_table;
-pub use self::sql_table::ClickHouseTable;
+pub use self::sql_table::ClickHouseTableProvider;
 
+use crate::sql::db_connection_pool::clickhousepool::ClickHouseConnectionPool;
 use crate::sql::db_connection_pool::{
     clickhousepool::ClickHouseConnectionPoolFactory, DbConnectionPool,
 };
@@ -48,6 +49,56 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 
 fn to_datafusion_error(error: Error) -> DataFusionError {
     DataFusionError::External(Box::new(error))
+}
+
+pub struct ClickHouseTableFactory {
+    pool: Arc<ClickHouseConnectionPool>,
+}
+
+impl ClickHouseTableFactory {
+    #[must_use]
+    pub fn new(pool: Arc<ClickHouseConnectionPool>) -> Self {
+        Self { pool }
+    }
+
+    pub async fn table_provider(
+        &self,
+        table_reference: TableReference,
+    ) -> Result<Arc<dyn TableProvider + 'static>, Box<dyn std::error::Error + Send + Sync>> {
+        let pool = Arc::clone(&self.pool);
+
+        let table_provider = Arc::new(
+            ClickHouseTableProvider::new(&pool, table_reference)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,
+        );
+
+        #[cfg(feature = "clickhouse-federation")]
+        let table_provider = Arc::new(
+            table_provider
+                .create_federated_table_provider()
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,
+        );
+
+        Ok(table_provider)
+    }
+
+    // pub async fn read_write_table_provider(
+    //     &self,
+    //     table_reference: TableReference,
+    // ) -> Result<Arc<dyn TableProvider + 'static>, Box<dyn std::error::Error + Send + Sync>> {
+    //     let read_provider = Self::table_provider(self, table_reference.clone()).await?;
+    //     let schema = read_provider.schema();
+
+    //     let postgres = Postgres::new(
+    //         table_reference,
+    //         Arc::clone(&self.pool),
+    //         schema,
+    //         Constraints::empty(),
+    //     );
+
+    //     Ok(PostgresTableWriter::create(read_provider, postgres, None))
+    // }
 }
 
 #[derive(Default, Debug)]

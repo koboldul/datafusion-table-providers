@@ -1,12 +1,16 @@
 #![cfg(feature = "clickhouse")]
 
-use crate::sql::db_connection_pool::{clickhousepool::ClickHouseConnectionPool, DbConnectionPool};
+use crate::sql::{
+    db_connection_pool::clickhousepool::{ClickHouseConnectionPool, DynClickHouseConnectionPool},
+    sql_provider_datafusion::{self, SqlTable},
+};
 use async_trait::async_trait;
+use clickhouse::Client;
 use datafusion::{
     arrow::datatypes::SchemaRef,
     datasource::{TableProvider, TableType},
     error::{DataFusionError, Result as DataFusionResult},
-    execution::{context::SessionState, SendableRecordBatchStream},
+    execution::SendableRecordBatchStream,
     logical_expr::{Expr, TableProviderFilterPushDown},
     physical_expr::EquivalenceProperties,
     physical_plan::execution_plan::{Boundedness, EmissionType},
@@ -15,38 +19,45 @@ use datafusion::{
 };
 use std::{any::Any, sync::Arc};
 
+/********************************
+    Table provider
+*********************************/
+
 #[derive(Clone)]
-pub struct ClickHouseTable {
-    client: Arc<clickhouse::Client>,
-    table_reference: TableReference,
+pub struct ClickHouseTableProvider {
+    pool: Arc<ClickHouseConnectionPool>,
+    pub(crate) base_table: SqlTable<Client, String>,
     schema: SchemaRef,
 }
 
-impl std::fmt::Debug for ClickHouseTable {
+impl std::fmt::Debug for ClickHouseTableProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClickHouseTable")
-            .field("table_reference", &self.table_reference)
+            .field("table_reference", &self.base_table)
             .field("schema", &self.schema)
             .finish()
     }
 }
 
-impl ClickHouseTable {
-    pub fn new(
-        client: Arc<clickhouse::Client>,
+impl ClickHouseTableProvider {
+    pub async fn new(
+        pool: &Arc<ClickHouseConnectionPool>,
         table_reference: TableReference,
-        schema: SchemaRef,
-    ) -> Self {
-        Self {
-            client,
-            table_reference,
+    ) -> Result<Self, sql_provider_datafusion::Error> {
+        let dyn_pool = Arc::clone(pool) as Arc<DynClickHouseConnectionPool>;
+        let base_table = SqlTable::new("clickhouse", &dyn_pool, table_reference).await?;
+        let schema = base_table.schema();
+
+        Ok(Self {
+            pool: Arc::clone(pool),
+            base_table,
             schema,
-        }
+        })
     }
 }
 
 #[async_trait]
-impl TableProvider for ClickHouseTable {
+impl TableProvider for ClickHouseTableProvider {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -81,7 +92,7 @@ impl TableProvider for ClickHouseTable {
             None,
         )?);
 
-        Ok(Arc::new(StreamExec::new(projected_schema, stream)))
+        Ok(Arc::new(ClickHouseSQLExec::new(projected_schema, stream)))
     }
 
     fn supports_filters_pushdown(
@@ -96,14 +107,18 @@ impl TableProvider for ClickHouseTable {
     }
 }
 
+/********************************
+    Execution Plan
+*********************************/
+
 // A simple ExecutionPlan that wraps a SendableRecordBatchStream
-struct StreamExec {
+struct ClickHouseSQLExec {
     schema: SchemaRef,
     stream: SendableRecordBatchStream,
     plan_properties: PlanProperties,
 }
 
-impl StreamExec {
+impl ClickHouseSQLExec {
     fn new(schema: SchemaRef, stream: SendableRecordBatchStream) -> Self {
         let plan_properties = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -119,7 +134,7 @@ impl StreamExec {
     }
 }
 
-impl std::fmt::Debug for StreamExec {
+impl std::fmt::Debug for ClickHouseSQLExec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StreamExec")
             .field("schema", &self.schema)
@@ -128,13 +143,13 @@ impl std::fmt::Debug for StreamExec {
 }
 
 // Safety: StreamExec is Send and Sync if its fields are
-unsafe impl Send for StreamExec {}
-unsafe impl Sync for StreamExec {}
+unsafe impl Send for ClickHouseSQLExec {}
+unsafe impl Sync for ClickHouseSQLExec {}
 
 use datafusion::physical_plan::DisplayAs;
 use std::fmt;
 
-impl DisplayAs for StreamExec {
+impl DisplayAs for ClickHouseSQLExec {
     fn fmt_as(
         &self,
         t: datafusion::physical_plan::DisplayFormatType,
@@ -147,7 +162,7 @@ impl DisplayAs for StreamExec {
     }
 }
 
-impl ExecutionPlan for StreamExec {
+impl ExecutionPlan for ClickHouseSQLExec {
     fn as_any(&self) -> &dyn Any {
         self
     }
