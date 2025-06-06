@@ -4,7 +4,7 @@ use std::{any::Any, sync::Arc};
 use crate::sql::db_connection_pool::dbconnection::{
     AsyncDbConnection, DbConnection, Error as DbConnectionError, GenericError, Result,
 };
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{DataType, Field, SchemaRef};
 use async_trait::async_trait;
 use clickhouse::{error::Error as ClickHouseError, Client, Row};
 use datafusion::{execution::SendableRecordBatchStream, sql::TableReference};
@@ -65,6 +65,15 @@ impl ClickHouseConnection {
                     // Potentially map to Dictionary, but needs clickhouse-rs support investigation.
                     // For now, map to inner type.
                     Self::map_clickhouse_type_to_arrow(inner_type, field_name)
+                } else if ch_type.starts_with("Array(") && ch_type.ends_with(')') {
+                    let inner_type = &ch_type[6..ch_type.len() - 1];
+                    let inner_arrow_type =
+                        Self::map_clickhouse_type_to_arrow(inner_type, field_name)?;
+                    Ok(DataType::List(Arc::new(Field::new(
+                        field_name,
+                        inner_arrow_type,
+                        false,
+                    ))))
                 }
                 // TODO: Handle Nested, Enum, UUID, IPv4/6, Decimal etc.
                 else {
@@ -232,5 +241,23 @@ impl AsyncDbConnection<Client, String> for ClickHouseConnection {
             .await
             .map(|_| 0u64) // ClickHouse execute doesn't return affected rows count, return 0
             .map_err(|e| Box::new(e) as GenericError)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::{DataType, Field};
+    use std::sync::Arc;
+
+    #[test]
+    fn test_map_clickhouse_array_type_to_arrow() {
+        let result = ClickHouseConnection::map_clickhouse_type_to_arrow("Array(Int32)", "col");
+        let expected = DataType::List(Arc::new(Field::new("col", DataType::Int32, false)));
+
+        match result {
+            Ok(data_type) => assert_eq!(data_type, expected),
+            Err(e) => panic!("Expected Ok result, got error: {:?}", e),
+        }
     }
 }

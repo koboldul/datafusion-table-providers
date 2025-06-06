@@ -14,7 +14,7 @@ use datafusion::{
     logical_expr::{Expr, TableProviderFilterPushDown},
     physical_expr::EquivalenceProperties,
     physical_plan::execution_plan::{Boundedness, EmissionType},
-    physical_plan::{project_schema, ExecutionPlan, Partitioning, PhysicalExpr, PlanProperties},
+    physical_plan::{ExecutionPlan, Partitioning, PlanProperties},
     sql::TableReference,
 };
 use std::{any::Any, sync::Arc};
@@ -82,17 +82,10 @@ impl TableProvider for ClickHouseTableProvider {
 
         // Return an empty MemoryStream for the projected schema
         use arrow::record_batch::RecordBatch;
-        use datafusion::execution::SendableRecordBatchStream;
-        use datafusion::physical_plan::memory::MemoryStream;
 
         let batches: Vec<RecordBatch> = Vec::new();
-        let stream: SendableRecordBatchStream = Box::pin(MemoryStream::try_new(
-            batches,
-            projected_schema.clone(),
-            None,
-        )?);
 
-        Ok(Arc::new(ClickHouseSQLExec::new(projected_schema, stream)))
+        Ok(Arc::new(ClickHouseSQLExec::new(projected_schema, batches)))
     }
 
     fn supports_filters_pushdown(
@@ -111,15 +104,15 @@ impl TableProvider for ClickHouseTableProvider {
     Execution Plan
 *********************************/
 
-// A simple ExecutionPlan that wraps a SendableRecordBatchStream
+// A simple ExecutionPlan that stores data needed to create streams
 struct ClickHouseSQLExec {
     schema: SchemaRef,
-    stream: SendableRecordBatchStream,
+    batches: Arc<Vec<arrow::record_batch::RecordBatch>>,
     plan_properties: PlanProperties,
 }
 
 impl ClickHouseSQLExec {
-    fn new(schema: SchemaRef, stream: SendableRecordBatchStream) -> Self {
+    fn new(schema: SchemaRef, batches: Vec<arrow::record_batch::RecordBatch>) -> Self {
         let plan_properties = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
@@ -128,7 +121,7 @@ impl ClickHouseSQLExec {
         );
         Self {
             schema,
-            stream,
+            batches: Arc::new(batches),
             plan_properties,
         }
     }
@@ -195,10 +188,13 @@ impl ExecutionPlan for ClickHouseSQLExec {
         _partition: usize,
         _context: Arc<datafusion::execution::context::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        Err(DataFusionError::NotImplemented(
-            "StreamExec::execute needs refinement - stream should likely be created here"
-                .to_string(),
-        ))
+        use datafusion::physical_plan::memory::MemoryStream;
+
+        let batches = (*self.batches).clone();
+        let stream: SendableRecordBatchStream =
+            Box::pin(MemoryStream::try_new(batches, self.schema.clone(), None)?);
+
+        Ok(stream)
     }
 
     fn statistics(&self) -> Result<datafusion::common::Statistics, DataFusionError> {
