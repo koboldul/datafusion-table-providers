@@ -1,7 +1,7 @@
 #![cfg(feature = "clickhouse")]
 
 mod sql_table;
-pub use self::sql_table::ClickHouseTableProvider;
+pub use self::sql_table::ClickHouseTable;
 
 use crate::sql::db_connection_pool::clickhousepool::ClickHouseConnectionPool;
 use crate::sql::db_connection_pool::{
@@ -68,17 +68,18 @@ impl ClickHouseTableFactory {
         let pool = Arc::clone(&self.pool);
 
         let table_provider = Arc::new(
-            ClickHouseTableProvider::new(&pool, table_reference)
+            ClickHouseTable::new(&pool, table_reference)
                 .await
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,
         );
 
-        #[cfg(feature = "clickhouse-federation")]
-        let table_provider = Arc::new(
-            table_provider
-                .create_federated_table_provider()
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,
-        );
+        // Note: Federation support would need to be implemented for ClickHouseTable
+        // #[cfg(feature = "clickhouse-federation")]
+        // let table_provider = Arc::new(
+        //     table_provider
+        //         .create_federated_table_provider()
+        //         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,
+        // );
 
         Ok(table_provider)
     }

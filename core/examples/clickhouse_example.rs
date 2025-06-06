@@ -79,6 +79,7 @@ async fn main() {
         .await
         .expect("select 1 failed");
     println!("Executing simple query on ClickHouse table...");
+    //print!("xxx {}", df_simple.count().await.expect("count failed"));
     df_simple.show().await.expect("show failed");
 
     // // Test basic connection creation (without actually connecting to a server)

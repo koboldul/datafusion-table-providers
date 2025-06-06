@@ -2,7 +2,7 @@
 
 use crate::sql::{
     db_connection_pool::clickhousepool::{ClickHouseConnectionPool, DynClickHouseConnectionPool},
-    sql_provider_datafusion::{self, SqlTable},
+    sql_provider_datafusion::{self, get_stream, to_execution_error, SqlExec, SqlTable},
 };
 use async_trait::async_trait;
 use clickhouse::Client;
@@ -10,93 +10,100 @@ use datafusion::{
     arrow::datatypes::SchemaRef,
     datasource::{TableProvider, TableType},
     error::{DataFusionError, Result as DataFusionResult},
-    execution::SendableRecordBatchStream,
+    execution::{SendableRecordBatchStream, TaskContext},
     logical_expr::{Expr, TableProviderFilterPushDown},
-    physical_expr::EquivalenceProperties,
-    physical_plan::execution_plan::{Boundedness, EmissionType},
-    physical_plan::{ExecutionPlan, Partitioning, PlanProperties},
+    physical_plan::{
+        stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan,
+        PlanProperties,
+    },
     sql::TableReference,
 };
-use std::{any::Any, sync::Arc};
+use futures::TryStreamExt;
+use std::{any::Any, fmt, sync::Arc};
 
 /********************************
     Table provider
 *********************************/
 
-#[derive(Clone)]
-pub struct ClickHouseTableProvider {
+pub struct ClickHouseTable {
     pool: Arc<ClickHouseConnectionPool>,
     pub(crate) base_table: SqlTable<Client, String>,
-    schema: SchemaRef,
 }
 
-impl std::fmt::Debug for ClickHouseTableProvider {
+impl std::fmt::Debug for ClickHouseTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClickHouseTable")
-            .field("table_reference", &self.base_table)
-            .field("schema", &self.schema)
+            .field("base_table", &self.base_table)
             .finish()
     }
 }
 
-impl ClickHouseTableProvider {
+impl ClickHouseTable {
     pub async fn new(
         pool: &Arc<ClickHouseConnectionPool>,
-        table_reference: TableReference,
+        table_reference: impl Into<TableReference>,
     ) -> Result<Self, sql_provider_datafusion::Error> {
         let dyn_pool = Arc::clone(pool) as Arc<DynClickHouseConnectionPool>;
         let base_table = SqlTable::new("clickhouse", &dyn_pool, table_reference).await?;
-        let schema = base_table.schema();
 
         Ok(Self {
             pool: Arc::clone(pool),
             base_table,
-            schema,
         })
+    }
+
+    fn create_physical_plan(
+        &self,
+        projections: Option<&Vec<usize>>,
+        schema: &SchemaRef,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let sql = self.base_table.scan_to_sql(projections, filters, limit)?;
+        Ok(Arc::new(ClickHouseSQLExec::new(
+            projections,
+            schema,
+            Arc::clone(&self.pool),
+            sql,
+        )?))
     }
 }
 
 #[async_trait]
-impl TableProvider for ClickHouseTableProvider {
+impl TableProvider for ClickHouseTable {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
     fn schema(&self) -> SchemaRef {
-        Arc::clone(&self.schema)
+        self.base_table.schema()
     }
 
     fn table_type(&self) -> TableType {
-        TableType::Base
+        self.base_table.table_type()
+    }
+
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
+        self.base_table.supports_filters_pushdown(filters)
     }
 
     async fn scan(
         &self,
         _state: &dyn datafusion::catalog::Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
-        _limit: Option<usize>,
+        filters: &[Expr],
+        limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        // Project the schema based on the projection
-        let projected_schema = datafusion::physical_plan::project_schema(&self.schema, projection)?;
-
-        // Return an empty MemoryStream for the projected schema
-        use arrow::record_batch::RecordBatch;
-
-        let batches: Vec<RecordBatch> = Vec::new();
-
-        Ok(Arc::new(ClickHouseSQLExec::new(projected_schema, batches)))
+        self.create_physical_plan(projection, &self.schema(), filters, limit)
     }
+}
 
-    fn supports_filters_pushdown(
-        &self,
-        _filters: &[&Expr],
-    ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
-        // TODO: Implement actual filter pushdown analysis
-        Ok(vec![
-            TableProviderFilterPushDown::Unsupported;
-            _filters.len()
-        ])
+impl fmt::Display for ClickHouseTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ClickHouseTable {}", self.base_table.name())
     }
 }
 
@@ -104,76 +111,60 @@ impl TableProvider for ClickHouseTableProvider {
     Execution Plan
 *********************************/
 
-// A simple ExecutionPlan that stores data needed to create streams
 struct ClickHouseSQLExec {
-    schema: SchemaRef,
-    batches: Arc<Vec<arrow::record_batch::RecordBatch>>,
-    plan_properties: PlanProperties,
+    base_exec: SqlExec<Client, String>,
 }
 
 impl ClickHouseSQLExec {
-    fn new(schema: SchemaRef, batches: Vec<arrow::record_batch::RecordBatch>) -> Self {
-        let plan_properties = PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        );
-        Self {
-            schema,
-            batches: Arc::new(batches),
-            plan_properties,
-        }
+    fn new(
+        projections: Option<&Vec<usize>>,
+        schema: &SchemaRef,
+        pool: Arc<ClickHouseConnectionPool>,
+        sql: String,
+    ) -> DataFusionResult<Self> {
+        let base_exec = SqlExec::new(projections, schema, pool, sql)?;
+
+        Ok(Self { base_exec })
+    }
+
+    fn sql(&self) -> sql_provider_datafusion::Result<String> {
+        self.base_exec.sql()
     }
 }
 
 impl std::fmt::Debug for ClickHouseSQLExec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamExec")
-            .field("schema", &self.schema)
-            .finish()
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let sql = self.sql().unwrap_or_default();
+        write!(f, "ClickHouseSQLExec sql={sql}")
     }
 }
 
-// Safety: StreamExec is Send and Sync if its fields are
-unsafe impl Send for ClickHouseSQLExec {}
-unsafe impl Sync for ClickHouseSQLExec {}
-
-use datafusion::physical_plan::DisplayAs;
-use std::fmt;
-
 impl DisplayAs for ClickHouseSQLExec {
-    fn fmt_as(
-        &self,
-        t: datafusion::physical_plan::DisplayFormatType,
-        f: &mut fmt::Formatter<'_>,
-    ) -> fmt::Result {
-        match t {
-            datafusion::physical_plan::DisplayFormatType::Default => write!(f, "StreamExec"),
-            _ => write!(f, "StreamExec (unimplemented format)"),
-        }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        let sql = self.sql().unwrap_or_default();
+        write!(f, "ClickHouseSQLExec sql={sql}")
     }
 }
 
 impl ExecutionPlan for ClickHouseSQLExec {
+    fn name(&self) -> &'static str {
+        "ClickHouseSQLExec"
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn name(&self) -> &str {
-        "StreamExec"
-    }
-
-    fn properties(&self) -> &datafusion::physical_plan::PlanProperties {
-        &self.plan_properties
-    }
-
     fn schema(&self) -> SchemaRef {
-        Arc::clone(&self.schema)
+        self.base_exec.schema()
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        self.base_exec.properties()
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![]
+        self.base_exec.children()
     }
 
     fn with_new_children(
@@ -186,18 +177,15 @@ impl ExecutionPlan for ClickHouseSQLExec {
     fn execute(
         &self,
         _partition: usize,
-        _context: Arc<datafusion::execution::context::TaskContext>,
+        _context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        use datafusion::physical_plan::memory::MemoryStream;
+        let sql = self.sql().map_err(to_execution_error)?;
+        tracing::debug!("ClickHouseSQLExec sql: {sql}");
 
-        let batches = (*self.batches).clone();
-        let stream: SendableRecordBatchStream =
-            Box::pin(MemoryStream::try_new(batches, self.schema.clone(), None)?);
+        let fut = get_stream(self.base_exec.clone_pool(), sql, Arc::clone(&self.schema()));
 
-        Ok(stream)
-    }
-
-    fn statistics(&self) -> Result<datafusion::common::Statistics, DataFusionError> {
-        Ok(datafusion::common::Statistics::new_unknown(&self.schema))
+        let stream = futures::stream::once(fut).try_flatten();
+        let schema = Arc::clone(&self.schema());
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 }
