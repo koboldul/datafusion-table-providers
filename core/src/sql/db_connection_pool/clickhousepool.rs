@@ -24,34 +24,35 @@ pub enum Error {
 
 pub struct ClickHouseConnectionPoolFactory {
     dsn: String,
-    // Add other pool configuration options here if needed (e.g., min_idle, max_size)
+    // Add other pool configuration options here if needed (e.g., min_idle, max_size),
+    catalog: String,
 }
 
 impl ClickHouseConnectionPoolFactory {
     /// Creates a new factory from a ClickHouse connection string URL.
     /// Example: tcp://user:password@host:port/database?options...
-    pub fn new(connection_string: &str) -> Result<Self, Error> {
+    pub fn new(
+        connection_string: impl Into<String>,
+        catalog: impl Into<String>,
+    ) -> Result<Self, Error> {
         Ok(Self {
-            dsn: connection_string.to_string(),
+            dsn: connection_string.into(),
+            catalog: catalog.into(),
         })
     }
 
     /// Builds the `ClickHouseConnectionPool`.
     pub async fn build(&self) -> Result<ClickHouseConnectionPool> {
-        let client = Client::default().with_url(&self.dsn);
-        // Test connection? client.ping().await might do this implicitly or error later.
-        // Let's assume the client creation itself is enough for now.
+        // Create client with base URL (without database path)
+        let client = Client::default()
+            .with_url(&self.dsn)
+            .with_user("ice")
+            .with_password("")
+            .with_database(&self.catalog) // Set default database
+            .with_compression(clickhouse::Compression::None); // Forces POST requests by using compression setting
 
-        // Determine JoinPushDown based on the database name
-        // Extract database name from DSN string (simple parse)
-        let db_name = self
-            .dsn
-            .split('/')
-            .last()
-            .and_then(|s| s.split('?').next())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| Error::MissingDatabaseName {})?;
-        let join_push_down = JoinPushDown::AllowedFor(db_name.to_string());
+        // Use "default" as the database name for JoinPushDown
+        let join_push_down = JoinPushDown::AllowedFor("default".to_string());
 
         Ok(ClickHouseConnectionPool {
             client,

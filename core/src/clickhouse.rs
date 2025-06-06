@@ -76,7 +76,7 @@ impl datafusion::catalog::TableProviderFactory for ClickHouseTableProviderFactor
         let connection_string =
             Self::get_connection_string(&cmd.options).map_err(|e| to_datafusion_error(e))?;
 
-        let pool_factory = ClickHouseConnectionPoolFactory::new(&connection_string)
+        let pool_factory = ClickHouseConnectionPoolFactory::new(&connection_string, "default")
             .context(UnableToCreatePoolSnafu)
             .map_err(|e| to_datafusion_error(e))?;
 

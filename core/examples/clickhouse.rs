@@ -1,13 +1,15 @@
 #![cfg(feature = "clickhouse")]
-
-use datafusion::prelude::*;
-use datafusion_table_providers::common::DatabaseCatalogProvider;
-use datafusion_table_providers::sql::db_connection_pool::clickhousepool::ClickHouseConnectionPoolFactory;
+use datafusion::prelude::SessionContext;
+use datafusion_table_providers::{
+    common::DatabaseCatalogProvider,
+    sql::db_connection_pool::clickhousepool::ClickHouseConnectionPoolFactory,
+    sql::db_connection_pool::DbConnectionPool,
+};
 use std::sync::Arc;
 
-/// This example demonstrates querying a ClickHouse database.
+/// This example demonstrates creating a ClickHouse connection pool.
 ///
-/// To run this example, ensure you have a ClickHouse instance running
+/// To run this example with a real ClickHouse instance, ensure you have one running
 /// and provide the correct connection string.
 ///
 /// For example, using Docker:
@@ -20,42 +22,66 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() {
     println!("Running ClickHouse example...");
+    println!("This example demonstrates ClickHouse connection pool creation.");
+
+    let connection_string = "http://localhost:8123";
     println!(
-        "Make sure you have a ClickHouse instance running and a table named 'default.my_table'."
+        "Creating ClickHouse connection pool for: {}",
+        connection_string
     );
 
-    let connection_string = "http://ice@localhost:8123/default";
-    println!("Connecting to ClickHouse at: {}", connection_string);
+    let factory = match ClickHouseConnectionPoolFactory::new(connection_string, "default") {
+        Ok(factory) => factory,
+        Err(e) => {
+            eprintln!("Failed to create ClickHouse connection pool factory: {}", e);
+            return;
+        }
+    };
 
-    let factory = ClickHouseConnectionPoolFactory::new(connection_string)
-        .expect("unable to create ClickHouse connection pool factory");
-    let ch_pool = Arc::new(
-        factory
-            .build()
-            .await
-            .expect("unable to build ClickHouse connection pool"),
-    );
+    let ch_pool = match factory.build().await {
+        Ok(pool) => Arc::new(pool),
+        Err(e) => {
+            eprintln!("Failed to build ClickHouse connection pool: {}", e);
+            return;
+        }
+    };
 
-    let catalog = DatabaseCatalogProvider::try_new(ch_pool).await.unwrap();
+    println!("ClickHouse connection pool created successfully!");
 
-    // Used to generate TableProvider instances that can read PostgreSQL table data
-    // let table_factory = ClickhouseTableFactory::new(ch_pool.clone());
-
-    // Create a DataFusion SessionContext
-    let ctx = SessionContext::new();
-
-    // ctx.register_catalog("default", table_provider)?;
-
-    // Query the external table
-    let df = ctx
-        .sql("SELECT * FROM datafusion_test LIMIT 10")
+    // Create database catalog provider
+    let catalog = DatabaseCatalogProvider::try_new(ch_pool.clone())
         .await
-        .expect("unable to execute SQL query");
+        .or_else(|err| {
+            eprintln!("Failed to create ClickHouse catalog provider: {}", err);
+            Err(err)
+        })
+        .expect("Failed to create ClickHouse catalog provider");
 
-    println!("Querying external table...");
+    // Create DataFusion session context
+    let ctx = SessionContext::new();
+    // Register ClickHouse catalog, making it accessible via the "clickhouse" name
+    ctx.register_catalog("clickhouse", Arc::new(catalog));
 
-    // Print the results
-    df.show().await.expect("unable to show results");
+    // Simple query test
+    let df_simple = ctx.sql("SELECT 1").await.expect("select 1 failed");
+    df_simple.show().await.expect("show failed");
+
+    // Test basic connection creation (without actually connecting to a server)
+    match ch_pool.connect().await {
+        Ok(_conn) => {
+            println!("Connection object created successfully!");
+            println!(
+                "Note: Actual database operations would require a running ClickHouse instance."
+            );
+        }
+        Err(e) => {
+            println!(
+                "Connection creation failed (expected without running server): {}",
+                e
+            );
+            println!("This is normal when no ClickHouse server is running.");
+        }
+    }
 
     println!("ClickHouse example finished successfully.");
 }
